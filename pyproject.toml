@@ -1,0 +1,40 @@
+[project]
+name = "triton"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mlx>=0.31.2",
+    "nanobind>=2.9.2",
+    "numpy>=2.2.0",
+]
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.9.2"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = ["src/compute", "src/memory", "src/runtime"]
+
+[tool.ruff]
+extend-exclude = ["build", "*.egg-info"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+
+[tool.mypy]
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+ignore_missing_imports = true
+follow_imports = "silent"
+exclude = [
+    "build/",
+    "tests/",
+    "demo.py",
+]
+
+[[tool.mypy.overrides]]
+module = ["mlx.*", "metal_backend"]
+ignore_missing_imports = true

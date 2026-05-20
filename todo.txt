@@ -1,0 +1,3 @@
+Metadata for objects
+DAG/linear fusion
+Logical transpose
