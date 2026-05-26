@@ -9,6 +9,7 @@ from compute.elementwise.elementwise import BroadcastSpec
 
 from orchestrator.builder import Operations
 from orchestrator.dag import DAG, build_dag
+from orchestrator.graph import Graph, Vertex
 from orchestrator.ir import (
     ElementwiseOp,
     Layout,
@@ -33,6 +34,7 @@ __all__ = [
     "BroadcastSpec",
     "DAG",
     "ElementwiseOp",
+    "Graph",
     "Layout",
     "MatmulOp",
     "Op",
@@ -43,5 +45,6 @@ __all__ = [
     "Scalar",
     "ShapeOp",
     "Tensor",
+    "Vertex",
     "build_dag",
 ]

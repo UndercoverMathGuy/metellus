@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from compute.fragments import CodegenContext
+from compute.fragments import CodegenContext, TgmemAccess
 
 
 class BroadcastSpec(StrEnum):
@@ -26,7 +26,11 @@ UNARY_EXPRESSIONS = {
     "recip": "1.0f / x",
     "sin": "sin(x)",
     "cos": "cos(x)",
-    "tanh": "tanh(x)",
+    # Numerically stable tanh. Metal's `tanh(x)` returns NaN for positive
+    # x past ~50 (its implementation overflows exp(x) to +inf and folds
+    # to inf/inf). This form evaluates exp on the non-negative branch only
+    # so the overflow becomes a clean inf → 2/inf → 0 → ±1 saturation.
+    "tanh": "copysign(1.0f - 2.0f / (1.0f + exp(2.0f * fabs(x))), x)",
     "floor": "floor(x)",
     "ceil": "ceil(x)",
     "sign": "(x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f)",
@@ -186,63 +190,6 @@ for (uint idx = flat_tid; idx < {rows * cols}; idx += {num_threads}) {{
 """
 
 
-def elementwise_threadgroup_scalar_section(
-    op: str,
-    output_tile: str,
-    x_tile: str,
-    scalar_name: str,
-    tile_shape: tuple[int, int],
-    num_threads: int,
-) -> str:
-    return elementwise_threadgroup_section(
-        op,
-        output_tile,
-        x_tile,
-        tile_shape,
-        num_threads,
-        y_tile=scalar_name,
-        y_broadcast="scalar",
-    )
-
-
-def elementwise_threadgroup_row_section(
-    op: str,
-    output_tile: str,
-    x_tile: str,
-    row_tile: str,
-    tile_shape: tuple[int, int],
-    num_threads: int,
-) -> str:
-    return elementwise_threadgroup_section(
-        op,
-        output_tile,
-        x_tile,
-        tile_shape,
-        num_threads,
-        y_tile=row_tile,
-        y_broadcast="row",
-    )
-
-
-def elementwise_threadgroup_col_section(
-    op: str,
-    output_tile: str,
-    x_tile: str,
-    col_tile: str,
-    tile_shape: tuple[int, int],
-    num_threads: int,
-) -> str:
-    return elementwise_threadgroup_section(
-        op,
-        output_tile,
-        x_tile,
-        tile_shape,
-        num_threads,
-        y_tile=col_tile,
-        y_broadcast="col",
-    )
-
-
 @dataclass(frozen=True)
 class ElementwiseComputeFragment:
     op: str
@@ -269,3 +216,63 @@ class ElementwiseComputeFragment:
             tile_shape=self.tile_shape,
             num_threads=self.num_threads,
         )
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        rows, cols = self.tile_shape
+        tile_floats = rows * cols
+        arity = elementwise_arity(self.op)
+
+        def _broadcast_size(mode: str) -> int:
+            if mode == "scalar":
+                return 1
+            if mode == "row":
+                return cols
+            if mode == "col":
+                return rows
+            return tile_floats
+
+        def _broadcast_shape(mode: str) -> tuple[int, int]:
+            if mode == "scalar":
+                return (1, 1)
+            if mode == "row":
+                return (1, cols)
+            if mode == "col":
+                return (rows, 1)
+            return self.tile_shape
+
+        accesses: list[TgmemAccess] = [
+            TgmemAccess(
+                name=self.x_tile,
+                access="read",
+                size_floats=tile_floats,
+                shape=self.tile_shape,
+            ),
+        ]
+        if arity >= 2 and self.y_tile is not None:
+            accesses.append(
+                TgmemAccess(
+                    name=self.y_tile,
+                    access="read",
+                    size_floats=_broadcast_size(self.y_broadcast),
+                    shape=_broadcast_shape(self.y_broadcast),
+                )
+            )
+        if arity == 3 and self.cond_tile is not None:
+            accesses.append(
+                TgmemAccess(
+                    name=self.cond_tile,
+                    access="read",
+                    size_floats=_broadcast_size(self.cond_broadcast),
+                    shape=_broadcast_shape(self.cond_broadcast),
+                )
+            )
+        accesses.append(
+            TgmemAccess(
+                name=self.output_tile,
+                access="write",
+                size_floats=tile_floats,
+                shape=self.tile_shape,
+            )
+        )
+        return tuple(accesses)

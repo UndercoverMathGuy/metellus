@@ -58,25 +58,6 @@ Fragments compose via name binding. Templates concatenate fragments in order, th
 - Reductions: last-axis sum/max/min with cooperative SIMD-group reduction
 - Organizer: linear-chain fusion via placement decisions
 
-## What's left (all of these not all the time)
-
-- Lazy IR + public torch-y API
-- Compilation cache (hash IR → cached kernel)
-- End-to-end fusion demo: relu(matmul(A,B) + bias) as one fused kernel
-- Softmax + layernorm as compositions
-- Reshape/transpose hoisting (for K.T in attention)
-- Benchmark suite vs MLX
-- README + design doc
-- Autograd / backward passes
-- fp16, bf16, int8, int4
-- Flash Attention
-- Conv2D
-- Symbolic shape compilation (currently recompile per shape)
-- CSE, DCE, constant folding
-- Buffer reuse / lifetime analysis
-- Dynamic shapes
-- Multi-consumer fusion with cost-model scoring
-
 ## Design principles
 
 1. **Trust the Apple MSL compiler** for low-level scheduling, register allocation, instruction-level pipelining. Don't hand-schedule.

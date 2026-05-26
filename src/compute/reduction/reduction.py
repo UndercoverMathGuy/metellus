@@ -1,10 +1,16 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from compute.fragments import CodegenContext
+from compute.fragments import CodegenContext, TgmemAccess
 
 
 REDUCTION_OPS = ("sum", "max", "min", "product")
+
+
+def _scratch_floats(tg_x: int) -> int:
+    # One float per SIMD group in a threadgroup of `tg_x` threads (SIMD width
+    # is 32 on Apple Silicon).
+    return (tg_x + 31) // 32
 
 
 ValueTransform = Callable[[str], str]
@@ -18,19 +24,15 @@ extra buffers referenced by the produced expression."""
 class LastAxisReductionSetupFragment:
     rows_dim: str
     name: str
-    tree: bool = False
     kind: str = "setup"
 
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        return ()
+
     def render(self, ctx: CodegenContext) -> str:
-        row_expr = (
-            "threadgroup_position_in_grid.y"
-            if self.tree
-            else "threadgroup_position_in_grid.x"
-        )
-        block_line = "uint block = threadgroup_position_in_grid.x;" if self.tree else ""
         return f"""\
-uint row = {row_expr};
-{block_line}
+uint row = threadgroup_position_in_grid.x;
 uint lane = thread_position_in_threadgroup.x;
 uint simd_lane = lane & 31;
 uint simd_id = lane >> 5;
@@ -55,23 +57,28 @@ class LastAxisReductionComputeFragment:
     reduce_dim: str
     row_stride: str
     name: str
-    block_dim: str | None = None
+    tg_x: int
     col_stride: str = "1"
     value_transform: ValueTransform | None = None
     kind: str = "compute"
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        size = _scratch_floats(self.tg_x)
+        return (
+            TgmemAccess(
+                name=self.scratch_name,
+                access="readwrite",
+                size_floats=size,
+                shape=(1, size),
+            ),
+        )
 
     def render(self, ctx: CodegenContext) -> str:
         if self.op not in REDUCTION_OPS:
             raise ValueError(f"unsupported reduction op: {self.op}")
         identity = _identity(self.op)
         combine = _combine_expr(self.op, "acc", "value")
-        start_line = "uint start = 0;"
-        end_line = f"uint end = {self.reduce_dim};"
-        loop_start = "lane"
-        if self.block_dim is not None:
-            start_line = f"uint start = block * {self.block_dim};"
-            end_line = f"uint end = min({self.reduce_dim}, start + {self.block_dim});"
-            loop_start = "start + lane"
         idx_term = "idx" if self.col_stride == "1" else f"idx * ({self.col_stride})"
         raw_fetch = f"{self.input_name}[row * {self.row_stride} + {idx_term}]"
         value_expr = (
@@ -80,10 +87,9 @@ class LastAxisReductionComputeFragment:
             else raw_fetch
         )
         return f"""\
-{start_line}
-{end_line}
+uint end = {self.reduce_dim};
 float acc = {identity};
-for (uint idx = {loop_start}; idx < end; idx += {ctx.tg_x}) {{
+for (uint idx = lane; idx < end; idx += {ctx.tg_x}) {{
     float value = {value_expr};
     acc = {combine};
 }}
@@ -118,9 +124,22 @@ class StoreReductionResultFragment:
     output_name: str
     scratch_name: str
     name: str
+    tg_x: int
     value_transform: ValueTransform | None = None
     setup: tuple[str, ...] = ()
     kind: str = "store"
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        size = _scratch_floats(self.tg_x)
+        return (
+            TgmemAccess(
+                name=self.scratch_name,
+                access="read",
+                size_floats=size,
+                shape=(1, size),
+            ),
+        )
 
     def render(self, ctx: CodegenContext) -> str:
         setup_block = "\n    ".join(self.setup)
@@ -147,21 +166,6 @@ class StoreReductionResultFragment:
         return f"""\
 if (thread_position_in_threadgroup.x == 0) {{
     {body}
-}}"""
-
-
-@dataclass(frozen=True)
-class LastAxisReductionPartialStoreFragment:
-    partial_name: str
-    scratch_name: str
-    num_blocks_dim: str
-    name: str
-    kind: str = "compute"
-
-    def render(self, ctx: CodegenContext) -> str:
-        return f"""\
-if (thread_position_in_threadgroup.x == 0) {{
-    {self.partial_name}[row * {self.num_blocks_dim} + block] = {self.scratch_name}[0];
 }}"""
 
 

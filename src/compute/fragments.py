@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import textwrap
-from typing import Any
+from typing import Any, Literal
 
 KernelFragment = Any
+
+TgmemAccessKind = Literal["read", "write", "readwrite"]
+
+
+@dataclass(frozen=True)
+class TgmemAccess:
+    name: str
+    access: TgmemAccessKind
+    size_floats: int
+    shape: tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,56 @@ class BarrierFragment:
 
     def render(self, ctx: CodegenContext) -> str:
         return "threadgroup_barrier(mem_flags::mem_threadgroup);"
+
+    @property
+    def is_tgmem_barrier(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class AliasFragment:
+    """Pointer-alias `new_name` onto `old_name`'s threadgroup storage.
+
+    Emitted by the aliasing rewriter at the seam between two tenants
+    that share a physical slot — the prior tenant (`old_name`) has
+    just gone out of life, the next (`new_name`) is about to come in.
+    After this fragment, every `new_name[r][c]` reference compiles to
+    the same bytes as the corresponding region of `old_name`.
+
+    Aliasing reuses storage, so every thread must finish with the
+    prior tenant before any thread touches the new alias — i.e. a
+    `threadgroup_barrier(mem_flags::mem_threadgroup)` is required
+    between the last write/read of `old_name` and the first reference
+    via `new_name`. `preceded_by_barrier` controls whether this
+    fragment emits that barrier itself:
+
+      - `True`  → the surrounding template already places a barrier
+        immediately before this fragment; the alias line is emitted
+        on its own and we don't double up.
+      - `False` → emit the barrier, then the alias line.
+
+    The pointer is typed `threadgroup float (*)[<new_cols>]` so 2D
+    indexing through `new_name` decodes to the new tenant's stride
+    independent of how the underlying storage was originally declared.
+    """
+
+    old_name: str
+    new_name: str
+    new_shape: tuple[int, int]
+    preceded_by_barrier: bool
+    name: str = "alias"
+    kind: str = "alias"
+
+    def render(self, ctx: CodegenContext) -> str:
+        cols = self.new_shape[1]
+        alias_line = f"threadgroup float (*{self.new_name})[{cols}] = (threadgroup float (*)[{cols}]){self.old_name};"
+        if self.preceded_by_barrier:
+            return alias_line
+        return f"threadgroup_barrier(mem_flags::mem_threadgroup);\n{alias_line}"
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        return ()
 
 
 class CodegenEngine:

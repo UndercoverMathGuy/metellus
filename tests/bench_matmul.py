@@ -13,20 +13,12 @@ from compute.matmul import (
     MatmulSetupFragment,
     MatmulTgToDevFragment,
     MatmulTileMappingFragment,
-    SplitKComputeFragment,
-    SplitKPartialStoreFragment,
-    SplitKReduceComputeFragment,
-    SplitKReduceStoreFragment,
-    SplitKSetupFragment,
     ThreadIndexFragment,
 )
 from compute.matmul.config import (
-    SplitKConfig,
-    ceil_div,
     grid_for,
     is_aligned_shape,
     select_tile_config,
-    should_use_splitk,
 )
 from memory import TgLoadFragment
 from runtime import Allocate, Dispatch, Download, Fill, FromNumpy, Kernel, Runtime
@@ -53,47 +45,6 @@ def mlx_matmul_ms(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, float]:
         times.append((time.perf_counter() - start) * 1000)
 
     return np.array(out), float(np.mean(times))
-
-
-def _splitk_kernels(config: SplitKConfig) -> tuple[Kernel, Kernel]:
-    compute_fragments = (
-        SplitKSetupFragment(config, "M", "N", "parts"),
-        SplitKComputeFragment("A", "B", "K", "N", "part_K"),
-        SplitKPartialStoreFragment("P", "M", "N"),
-    )
-    reduce_fragments = (
-        SplitKSetupFragment(config, "M", "N", "parts", reduce=True),
-        SplitKReduceComputeFragment("P", "M", "N", "parts"),
-        SplitKReduceStoreFragment("C", "N"),
-    )
-    compute_ctx = CodegenContext(
-        function_name="splitk_matmul_kernel",
-        buffers=(
-            "device const float* A [[buffer(0)]]",
-            "device const float* B [[buffer(1)]]",
-            "device float* P [[buffer(2)]]",
-        ),
-        dims=("M", "K", "N", "part_K", "parts"),
-        tg_x=config.block_N,
-        tg_y=config.block_M,
-        position_type="uint3",
-        thread_type="uint3",
-    )
-    reduce_ctx = CodegenContext(
-        function_name="splitk_reduce_kernel",
-        buffers=(
-            "device const float* P [[buffer(0)]]",
-            "device float* C [[buffer(1)]]",
-        ),
-        dims=("M", "K", "N", "part_K", "parts"),
-        tg_x=config.block_N,
-        tg_y=config.block_M,
-        dims_buffer_index=2,
-    )
-    return (
-        Kernel(fragments=compute_fragments, ctx=compute_ctx),
-        Kernel(fragments=reduce_fragments, ctx=reduce_ctx),
-    )
 
 
 def _gemm_kernel(m: int, k: int, n: int) -> tuple[Kernel, object, bool]:
@@ -179,61 +130,6 @@ def _gemm_kernel(m: int, k: int, n: int) -> tuple[Kernel, object, bool]:
 def ours_matmul_ms(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, float, object]:
     m, k = a.shape
     _, n = b.shape
-
-    if should_use_splitk(m, k, n):
-        config = SplitKConfig()
-        parts = ceil_div(k, config.part_K)
-        compute_kernel, reduce_kernel = _splitk_kernels(config)
-        env = Runtime(
-            (
-                FromNumpy("A", a),
-                FromNumpy("B", b),
-                Allocate("P", parts * m * n * 4),
-                Allocate("C", m * n * 4),
-                compute_kernel,
-                reduce_kernel,
-            )
-        ).run()
-        dims = (m, k, n, config.part_K, parts)
-        grid_compute = (ceil_div(n, config.block_N), ceil_div(m, config.block_M), parts)
-        grid_reduce = (ceil_div(n, config.block_N), ceil_div(m, config.block_M), 1)
-        threads = (config.block_N, config.block_M, 1)
-        inner = Runtime(
-            (
-                Fill("P", 0),
-                Fill("C", 0),
-                Dispatch(
-                    compute_kernel,
-                    bindings=("A", "B", "P"),
-                    dims=dims,
-                    grid=grid_compute,
-                    threads=threads,
-                    time_key="t1",
-                ),
-                Dispatch(
-                    reduce_kernel,
-                    bindings=("P", "C"),
-                    dims=dims,
-                    grid=grid_reduce,
-                    threads=threads,
-                    time_key="t2",
-                ),
-            )
-        )
-        for _ in range(WARMUP):
-            inner.run(env)
-        times = []
-        for _ in range(ITERS):
-            inner.run(env)
-            times.append(env["t1"] + env["t2"])
-        Runtime((Download("C", shape=(m, n), dtype=np.float32, into="C_out"),)).run(env)
-        spec = {
-            "method": "splitk",
-            "config_label": f"{config.block_M}x{config.block_N}",
-            "aligned": False,
-            "tile_order": "row_major",
-        }
-        return env["C_out"], float(np.mean(times)), spec
 
     kernel, tile, aligned = _gemm_kernel(m, k, n)
     env = Runtime(

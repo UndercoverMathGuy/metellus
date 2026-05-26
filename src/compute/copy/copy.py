@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from compute.fragments import CodegenContext
+from compute.fragments import CodegenContext, TgmemAccess
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,10 @@ class StridedCopyFragment:
     input_cols: int
     name: str = "strided_copy"
     kind: str = "compute"
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        return ()
 
     def render(self, ctx: CodegenContext) -> str:
         # `flat_tid` is the in-threadgroup linear thread id. We add the

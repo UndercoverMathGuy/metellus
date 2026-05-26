@@ -111,11 +111,15 @@ def test_linearly_iterable_source_reshape_as_view(
     inherits the per-element step `c`, yielding strides `(K'·c, c)` for
     2D targets or `(c, 0)` for 1D — regardless of the source's
     contiguity at unit stride."""
+    # 0 in the param table means "use the contiguous default"; Tensor's
+    # sentinel for that is -1 (None bypasses the __post_init__ defaulting
+    # because None != -1, and the field stays None — which then carries
+    # through the same-shape reshape_view branch and breaks the assertion).
     src = Tensor(
         "x",
         src_shape,
-        row_stride=row_stride if row_stride else None,
-        col_stride=col_stride if col_stride else None,
+        row_stride=row_stride if row_stride else -1,
+        col_stride=col_stride if col_stride else -1,
     )
     assert src.can_reshape_as_view(new_shape)
     view = src.reshape_view(new_shape, name="v")
@@ -238,10 +242,13 @@ def test_shape_op_becomes_standalone_kernel_group():
     ops.input("X", shape=(8, 16))
     ops.transpose("X", out="Xt")
     ops.reshape("Xt", (128,), out="Y")
-    decisions = fuse(ops.build())
-    assert len(decisions) == 1
-    assert decisions[0].strategy is FusionStrategy.STANDALONE_SHAPE
-    assert decisions[0].shape_op is not None
+    vertices = fuse(ops.build())
+    assert len(vertices) == 1
+    assert assemble(vertices[0]).strategy is FusionStrategy.STANDALONE_SHAPE
+    # Standalone shape vertex carries exactly one ShapeOp.
+    from orchestrator.ir import ShapeOp
+
+    assert len(vertices[0].ops) == 1 and isinstance(vertices[0].ops[0], ShapeOp)
 
 
 def test_shape_op_alongside_matmul_runs_in_separate_kernels():
@@ -255,9 +262,9 @@ def test_shape_op_alongside_matmul_runs_in_separate_kernels():
     ops.transpose("C", out="Ct")
     ops.reshape("Ct", (64,), out="Cf")
     program = ops.build()
-    decisions = fuse(program)
-    assert len(decisions) == 2
-    strategies = {d.strategy for d in decisions}
+    vertices = fuse(program)
+    assert len(vertices) == 2
+    strategies = {assemble(v).strategy for v in vertices}
     assert FusionStrategy.STANDALONE_MATMUL in strategies
     assert FusionStrategy.STANDALONE_SHAPE in strategies
 
@@ -305,12 +312,13 @@ def _run_shape_kernel(x: np.ndarray, view_builder) -> np.ndarray:
     ops = Operations()
     out_name = view_builder(ops)
     program = ops.build()
-    decisions = fuse(program)
-    # We expect a single ShapeOp decision for these tests.
+    vertices = fuse(program)
+    # We expect a single ShapeOp vertex for these tests.
     assert (
-        len(decisions) == 1 and decisions[0].strategy is FusionStrategy.STANDALONE_SHAPE
+        len(vertices) == 1
+        and assemble(vertices[0]).strategy is FusionStrategy.STANDALONE_SHAPE
     )
-    group = assemble(decisions[0])
+    group = assemble(vertices[0])
     out_shape = ops.tensors[out_name].shape
     N = ops.tensors[out_name].element_count
 

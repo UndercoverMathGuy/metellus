@@ -2,7 +2,7 @@ import textwrap
 from dataclasses import dataclass
 from typing import Callable
 
-from compute.fragments import CodegenContext
+from compute.fragments import CodegenContext, TgmemAccess
 
 
 ValueTransform = Callable[[str], str]
@@ -223,52 +223,64 @@ def _float4_load(
     # existing code paths are byte-identical.
     has_transform = transform is not _identity_transform
 
+    # `transform` was built with col_var="global_col", so its emitted MSL
+    # reads secondary operands at whatever the in-scope `global_col` is.
+    # For lanes y/z/w we mutate `global_col` in place between assignments
+    # so each transform call sees the correct per-lane column. (Nothing
+    # after load_body reads global_col — stores use tile_col.)
     if aligned:
         if has_transform:
             load_body = _dedent(f"""
             float4 v = *((device const float4*)&{address});
             v.x = {transform("v.x")};
-            v.y = {transform("v.y")};
-            v.z = {transform("v.z")};
-            v.w = {transform("v.w")};
+            global_col += 1; v.y = {transform("v.y")};
+            global_col += 1; v.z = {transform("v.z")};
+            global_col += 1; v.w = {transform("v.w")};
             """).strip()
         else:
             load_body = f"float4 v = *((device const float4*)&{address});"
     else:
         # In-bounds path applies the transform to each component; OOB lanes
-        # stay 0.0f. Bulk-load path transforms all four since we just proved
-        # every lane is in-bounds.
-        bulk_load = f"v = *((device const float4*)&{address});"
+        # stay 0.0f.
         if has_transform:
             bulk_load = _dedent(f"""
             v = *((device const float4*)&{address});
             v.x = {transform("v.x")};
-            v.y = {transform("v.y")};
-            v.z = {transform("v.z")};
-            v.w = {transform("v.w")};
+            global_col += 1; v.y = {transform("v.y")};
+            global_col += 1; v.z = {transform("v.z")};
+            global_col += 1; v.w = {transform("v.w")};
             """).strip()
-        per_lane_x = transform(
-            f"{src_name}[global_row * ({src_row_stride}) + global_col]"
-        )
-        per_lane_y = transform(
-            f"{src_name}[global_row * ({src_row_stride}) + global_col + 1]"
-        )
-        per_lane_z = transform(
-            f"{src_name}[global_row * ({src_row_stride}) + global_col + 2]"
-        )
-        per_lane_w = transform(
-            f"{src_name}[global_row * ({src_row_stride}) + global_col + 3]"
-        )
+            per_lane = transform(
+                f"{src_name}[global_row * ({src_row_stride}) + global_col]"
+            )
+            per_lane_body = _dedent(f"""
+            v.x = (global_col < ({col_limit})) ? ({per_lane}) : 0.0f;
+            global_col += 1;
+            v.y = (global_col < ({col_limit})) ? ({per_lane}) : 0.0f;
+            global_col += 1;
+            v.z = (global_col < ({col_limit})) ? ({per_lane}) : 0.0f;
+            global_col += 1;
+            v.w = (global_col < ({col_limit})) ? ({per_lane}) : 0.0f;
+            """).strip()
+        else:
+            bulk_load = f"v = *((device const float4*)&{address});"
+            per_lane_x = f"{src_name}[global_row * ({src_row_stride}) + global_col]"
+            per_lane_y = f"{src_name}[global_row * ({src_row_stride}) + global_col + 1]"
+            per_lane_z = f"{src_name}[global_row * ({src_row_stride}) + global_col + 2]"
+            per_lane_w = f"{src_name}[global_row * ({src_row_stride}) + global_col + 3]"
+            per_lane_body = _dedent(f"""
+            v.x = (global_col < ({col_limit})) ? ({per_lane_x}) : 0.0f;
+            v.y = (global_col + 1 < ({col_limit})) ? ({per_lane_y}) : 0.0f;
+            v.z = (global_col + 2 < ({col_limit})) ? ({per_lane_z}) : 0.0f;
+            v.w = (global_col + 3 < ({col_limit})) ? ({per_lane_w}) : 0.0f;
+            """).strip()
         load_body = _dedent(f"""
         float4 v = float4(0.0f);
         if (global_row < ({row_limit})) {{
             if (global_col + 3 < ({col_limit}) && ((global_row * ({src_row_stride}) + global_col) % 4 == 0)) {{
                 {bulk_load}
             }} else {{
-                v.x = (global_col < ({col_limit})) ? ({per_lane_x}) : 0.0f;
-                v.y = (global_col + 1 < ({col_limit})) ? ({per_lane_y}) : 0.0f;
-                v.z = (global_col + 2 < ({col_limit})) ? ({per_lane_z}) : 0.0f;
-                v.w = (global_col + 3 < ({col_limit})) ? ({per_lane_w}) : 0.0f;
+                {per_lane_body}
             }}
         }}
         """).strip()
@@ -450,6 +462,18 @@ class TgLoadFragment:
             value_transform=self.value_transform,
         )
 
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        rows, cols = self.tile_shape
+        return (
+            TgmemAccess(
+                name=self.dst_name,
+                access="write",
+                size_floats=rows * cols,
+                shape=self.tile_shape,
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class TgStoreFragment:
@@ -478,4 +502,16 @@ class TgStoreFragment:
             row_limit=self.row_limit,
             col_limit=self.col_limit,
             dst_col_stride=self.dst_col_stride,
+        )
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        rows, cols = self.tile_shape
+        return (
+            TgmemAccess(
+                name=self.src_name,
+                access="read",
+                size_floats=rows * cols,
+                shape=self.tile_shape,
+            ),
         )

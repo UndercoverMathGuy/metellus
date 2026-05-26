@@ -8,10 +8,5 @@ from compute.matmul.matmul import (
     MatmulSetupFragment,
     MatmulTgToDevFragment,
     MatmulTileMappingFragment,
-    SplitKComputeFragment,
-    SplitKPartialStoreFragment,
-    SplitKReduceComputeFragment,
-    SplitKReduceStoreFragment,
-    SplitKSetupFragment,
     ThreadIndexFragment,
 )

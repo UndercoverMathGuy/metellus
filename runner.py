@@ -1,5 +1,6 @@
-"""Tricky-kernels driver. Each scenario builds an `Operations` program,
-fuses + assembles + schedules it, and prints the generated MSL plus
+"""Tricky-kernels driver. Each scenario builds an `Operations` program
+and runs it through the public `api.run` pipeline (fuse → assemble →
+lifetime → schedule → execute), printing the generated MSL plus
 per-kernel GPU timings. Goal: stress the compiler in ways that expose
 where the optimizer's next-most-valuable wins live."""
 
@@ -13,15 +14,48 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import numpy as np
+import mlx.core as mx
 
+from api import run as api_run
 from orchestrator import Operations
+from orchestrator.aliasing import alias_group
 from orchestrator.assembly import assemble
 from orchestrator.fusion import fuse
-from orchestrator.scheduler import schedule
 
 
 def _hr(char: str = "─", width: int = 78) -> None:
     print(char * width)
+
+
+def _describe_op(op) -> str:
+    """One-line human-readable summary of an IR op for the kernel dump."""
+    from orchestrator.ir import (
+        ElementwiseOp,
+        MatmulOp,
+        ReductionOp,
+        Scalar,
+        ShapeOp,
+    )
+
+    cls = type(op).__name__
+    if isinstance(op, MatmulOp):
+        return f"{cls}: {op.out.name} = {op.a.name} @ {op.b.name}"
+    if isinstance(op, ElementwiseOp):
+        operands = ", ".join(
+            (repr(o.value) if isinstance(o, Scalar) else o.name) for o in op.operands
+        )
+        bcasts = []
+        if op.y_broadcast.value != "none":
+            bcasts.append(f"y_bcast={op.y_broadcast.value}")
+        if op.cond_broadcast.value != "none":
+            bcasts.append(f"cond_bcast={op.cond_broadcast.value}")
+        tail = f" [{', '.join(bcasts)}]" if bcasts else ""
+        return f"{cls}: {op.out.name} = {op.op}({operands}){tail}"
+    if isinstance(op, ReductionOp):
+        return f"{cls}: {op.out.name} = {op.op}({op.input.name}, axis={op.axis})"
+    if isinstance(op, ShapeOp):
+        return f"{cls}: {op.out.name} = reshape({op.input.name}) [shape={op.out.shape}]"
+    return f"{cls}: {op.out.name}"
 
 
 def _dump_kernel(i: int, group) -> None:
@@ -33,20 +67,43 @@ def _dump_kernel(i: int, group) -> None:
     print(f"  dims:      {group.dims}")
     print(f"  grid:      {group.grid}")
     print(f"  threads:   {group.threads}")
-    print(f"  absorbed:  {[op.out.name for op in group.ops]}")
+    print(f"  absorbed ops ({len(group.ops)}):")
+    for op in group.ops:
+        print(f"    - {_describe_op(op)}")
     print()
     print(group.kernel.source)
 
 
-def run_scenario(name: str, build_fn, *, dump_msl: bool = True) -> dict:
-    """Build, fuse, assemble, schedule, run. Returns timing summary."""
+def run_scenario(
+    name: str, build_fn, mlx_fn=None, *, dump_msl: bool = True, execute: bool = True
+) -> dict:
+    """Build the IR and run it through `api.run` (or, when
+    `execute=False`, only compile via fuse + assemble for structural
+    inspection). When `mlx_fn` is provided and `execute=True`, also
+    time the MLX equivalent (one shot — no warmup, no averaging, JIT
+    included). Returns a summary dict; when `execute=False`, only the
+    structural fields are populated."""
     _hr("█")
     print(f"SCENARIO: {name}")
     _hr("█")
     ops = build_fn()
-    program = ops.build()
-    decisions = fuse(program)
-    groups = tuple(assemble(d) for d in decisions)
+
+    if execute:
+        start = time.perf_counter()
+        result = api_run(ops, profile=True)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        env = result.env
+        groups = result.groups
+    else:
+        # Compile-only path: fuse + assemble + alias for structural
+        # inspection. Mirror api.run so the dumped MSL matches what
+        # the runtime would actually compile.
+        vertices = fuse(ops.build())
+        groups = tuple(alias_group(assemble(v)) for v in vertices)
+        env = None
+        elapsed_ms = 0.0
+
+    program = ops.build()  # cheap; for IR-listing dump and op count.
 
     print(f"  primitive ops: {len(program)}")
     print(f"  fused kernels: {len(groups)}")
@@ -54,13 +111,33 @@ def run_scenario(name: str, build_fn, *, dump_msl: bool = True) -> dict:
     print()
 
     if dump_msl:
+        _hr("=")
+        print(f"IR program ({len(program)} ops)")
+        _hr("=")
+        for i, op in enumerate(program):
+            print(f"  {i:2d}  {_describe_op(op)}")
+        print()
         for i, group in enumerate(groups):
             _dump_kernel(i, group)
 
-    runtime = schedule(ops, groups, profile=True)
-    start = time.perf_counter()
-    env = runtime.run()
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    summary = {
+        "name": name,
+        "n_ops": len(program),
+        "n_kernels": len(groups),
+        "kernel_times": [],
+        "total_gpu_ms": 0.0,
+        "wall_ms": 0.0,
+        "mlx_ms": 0.0,
+        "strategies": [g.strategy.value for g in groups],
+        "allclose_ok": None,  # None = not checked (no mlx_fn or scenario errored)
+    }
+
+    if not execute:
+        _hr("=")
+        print(f"Skipped run — {name} (use without --no-run to time)")
+        _hr("=")
+        print()
+        return summary
 
     kernel_times = [float(env[f"t_{i}"]) for i in range(len(groups))]
     _hr("=")
@@ -72,17 +149,47 @@ def run_scenario(name: str, build_fn, *, dump_msl: bool = True) -> dict:
             f"{kernel_times[i]:7.3f} ms  ({group.kernel.function_name})"
         )
     print(f"  total GPU: {sum(kernel_times):.3f} ms")
-    print(f"  wall:      {elapsed_ms:.3f} ms")
+    print(f"  triton wall: {elapsed_ms:.3f} ms")
+
+    if mlx_fn is not None:
+        mlx_start = time.perf_counter()
+        mlx_outputs = mlx_fn(ops.uploads)
+        mlx_ms = (time.perf_counter() - mlx_start) * 1000.0
+        print(f"  mlx wall:    {mlx_ms:.3f} ms  (one-shot, JIT included)")
+        summary["mlx_ms"] = mlx_ms
+
+        # Cross-check every MLX output against our env entry by name.
+        # fp32 matmul accumulation drift makes tight tolerances unrealistic
+        # for K=1024+; rtol=1e-3, atol=1e-2 is the "matches within fp32
+        # ordering noise" line — anything past that is a real bug.
+        rtol, atol = 1e-3, 1e-2
+        all_ok = True
+        for out_name, mlx_arr in mlx_outputs.items():
+            ours = env.get(out_name)
+            if ours is None:
+                print(f"  allclose {out_name:6s}: MISSING from env")
+                all_ok = False
+                continue
+            ours_arr = np.asarray(ours)
+            diff = np.abs(ours_arr.astype(np.float32) - mlx_arr.astype(np.float32))
+            max_abs = float(diff.max()) if diff.size else 0.0
+            denom = np.maximum(np.abs(mlx_arr), 1e-12)
+            max_rel = float((diff / denom).max()) if diff.size else 0.0
+            ok = np.allclose(ours_arr, mlx_arr, rtol=rtol, atol=atol)
+            status = "OK  " if ok else "DIFF"
+            print(
+                f"  allclose {out_name:6s}: {status}  "
+                f"max|Δ|={max_abs:.2e}  max|Δ/x|={max_rel:.2e}"
+            )
+            if not ok:
+                all_ok = False
+        summary["allclose_ok"] = all_ok
+
     print()
-    return {
-        "name": name,
-        "n_ops": len(program),
-        "n_kernels": len(groups),
-        "kernel_times": kernel_times,
-        "total_gpu_ms": sum(kernel_times),
-        "wall_ms": elapsed_ms,
-        "strategies": [g.strategy.value for g in groups],
-    }
+    summary["kernel_times"] = kernel_times
+    summary["total_gpu_ms"] = sum(kernel_times)
+    summary["wall_ms"] = elapsed_ms
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -309,42 +416,174 @@ def s10_many_tensor_operands():
     return ops
 
 
+# ---------------------------------------------------------------------------
+# MLX counterparts — one shot each (no warmup, no averaging) so timing
+# includes JIT compile, matching what we charge our kernels on first
+# dispatch. `mx.eval` forces realisation since MLX is lazy.
+# ---------------------------------------------------------------------------
+
+
+def _mlx_s1(inputs):
+    C = mx.array(inputs["A"]) @ mx.array(inputs["B"])
+    mx.eval(C)
+    return {"C": np.asarray(C)}
+
+
+def _mlx_s2(inputs):
+    X, W, b = mx.array(inputs["X"]), mx.array(inputs["W"]), mx.array(inputs["bias"])
+    y = mx.maximum(X @ W + b, 0.0)
+    mx.eval(y)
+    return {"y": np.asarray(y)}
+
+
+def _mlx_s3(inputs):
+    A, B = mx.array(inputs["A"]), mx.array(inputs["B"])
+    z = A @ B
+    inner = math.sqrt(2.0 / math.pi) * (z + 0.044715 * z * z * z)
+    y = 0.5 * z * (1.0 + mx.tanh(inner))
+    mx.eval(y)
+    return {"y": np.asarray(y)}
+
+
+def _mlx_s4(inputs):
+    A, B = mx.array(inputs["A"]), mx.array(inputs["B"])
+    t = A @ B
+    r = mx.maximum(t, 0.0)
+    e = mx.exp(t)
+    mx.eval([r, e])
+    return {"r": np.asarray(r), "e": np.asarray(e)}
+
+
+def _mlx_s5(inputs):
+    Q, K, V = mx.array(inputs["Q"]), mx.array(inputs["Kmat"]), mx.array(inputs["V"])
+    scores = Q @ K.T
+    num = mx.exp(scores - mx.max(scores, axis=-1, keepdims=True))
+    probs = num / mx.sum(num, axis=-1, keepdims=True)
+    out = probs @ V
+    mx.eval(out)
+    return {"out": np.asarray(out)}
+
+
+def _mlx_s6(inputs):
+    X = mx.array(inputs["X"])
+    _, N = X.shape
+    mean = mx.sum(X, axis=-1, keepdims=True) / N
+    centered = X - mean
+    var = mx.sum(centered * centered, axis=-1, keepdims=True) / N
+    y = centered / mx.sqrt(var + 1e-5)
+    mx.eval(y)
+    return {"y": np.asarray(y)}
+
+
+def _mlx_s7(inputs):
+    A, B, b = mx.array(inputs["A"]), mx.array(inputs["B"]), mx.array(inputs["bias"])
+    y = mx.maximum(A @ B + b, 0.0)
+    mx.eval(y)
+    return {"y": np.asarray(y)}
+
+
+def _mlx_s8(inputs):
+    C = mx.array(inputs["A"]) @ mx.array(inputs["B"])
+    mx.eval(C)
+    return {"C": np.asarray(C)}
+
+
+def _mlx_s9(inputs):
+    X = mx.array(inputs["X"])
+    W1, b1 = mx.array(inputs["W1"]), mx.array(inputs["b1"])
+    W2, b2 = mx.array(inputs["W2"]), mx.array(inputs["b2"])
+    h1 = mx.maximum(X @ W1 + b1, 0.0)
+    y = mx.maximum(h1 @ W2 + b2, 0.0)
+    mx.eval(y)
+    return {"y": np.asarray(y)}
+
+
+def _mlx_s10(inputs):
+    xs = [mx.array(inputs[f"x{i}"]) for i in range(6)]
+    y = xs[0] + xs[1] + xs[2] + xs[3] + xs[4] + xs[5]
+    mx.eval(y)
+    return {"y": np.asarray(y)}
+
+
 SCENARIOS = [
-    ("s1_big_matmul_aligned", s1_big_matmul_aligned),
-    ("s2_mlp_layer", s2_mlp_layer),
-    ("s3_gelu_chain", s3_gelu_chain),
-    ("s4_diamond_multi_consumer", s4_diamond_multi_consumer),
-    ("s5_attention_block", s5_attention_block),
-    ("s6_layernorm_like", s6_layernorm_like),
-    ("s7_nonaligned_matmul", s7_nonaligned_matmul),
-    ("s8_tall_skinny_matmul", s8_tall_skinny_matmul),
-    ("s9_stacked_mlps", s9_stacked_mlps),
-    ("s10_many_tensor_operands", s10_many_tensor_operands),
+    ("s1_big_matmul_aligned", s1_big_matmul_aligned, _mlx_s1),
+    ("s2_mlp_layer", s2_mlp_layer, _mlx_s2),
+    ("s3_gelu_chain", s3_gelu_chain, _mlx_s3),
+    ("s4_diamond_multi_consumer", s4_diamond_multi_consumer, _mlx_s4),
+    ("s5_attention_block", s5_attention_block, _mlx_s5),
+    ("s6_layernorm_like", s6_layernorm_like, _mlx_s6),
+    ("s7_nonaligned_matmul", s7_nonaligned_matmul, _mlx_s7),
+    ("s8_tall_skinny_matmul", s8_tall_skinny_matmul, _mlx_s8),
+    ("s9_stacked_mlps", s9_stacked_mlps, _mlx_s9),
+    ("s10_many_tensor_operands", s10_many_tensor_operands, _mlx_s10),
 ]
 
 
 def main() -> int:
+    import traceback
+
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     only = args[0] if args else None
     dump_msl = "--no-msl" not in sys.argv
+    execute = "--no-run" not in sys.argv
     summaries = []
-    for name, fn in SCENARIOS:
+    for name, fn, mlx_fn in SCENARIOS:
         if only is not None and only not in name:
             continue
-        summaries.append(run_scenario(name, fn, dump_msl=dump_msl))
+        try:
+            summaries.append(
+                run_scenario(name, fn, mlx_fn, dump_msl=dump_msl, execute=execute)
+            )
+        except Exception as exc:
+            _hr("!")
+            print(f"FAILED — {name}")
+            _hr("!")
+            traceback.print_exc()
+            print()
+            summaries.append(
+                {
+                    "name": name,
+                    "n_ops": 0,
+                    "n_kernels": 0,
+                    "kernel_times": [],
+                    "total_gpu_ms": 0.0,
+                    "wall_ms": 0.0,
+                    "mlx_ms": 0.0,
+                    "strategies": [],
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
     _hr("█")
     print("SUMMARY")
     _hr("█")
-    print(
-        f"{'scenario':30s} {'ops':>4s} {'kerns':>5s} {'gpu (ms)':>10s} {'wall (ms)':>10s}"
-    )
-    for s in summaries:
+    if execute:
         print(
-            f"{s['name']:30s} {s['n_ops']:>4d} {s['n_kernels']:>5d} "
-            f"{s['total_gpu_ms']:>10.3f} {s['wall_ms']:>10.3f}"
+            f"{'scenario':30s} {'ops':>4s} {'kerns':>5s} {'gpu (ms)':>10s} "
+            f"{'wall (ms)':>10s} {'mlx (ms)':>10s} {'allclose':>9s}  status"
         )
-    return 0
+        for s in summaries:
+            if "error" in s:
+                allclose_str = "-"
+                status = s["error"]
+            else:
+                ac = s.get("allclose_ok")
+                allclose_str = {True: "OK", False: "DIFF", None: "n/a"}[ac]
+                status = "ok" if ac is not False else "MISMATCH"
+            print(
+                f"{s['name']:30s} {s['n_ops']:>4d} {s['n_kernels']:>5d} "
+                f"{s['total_gpu_ms']:>10.3f} {s['wall_ms']:>10.3f} "
+                f"{s['mlx_ms']:>10.3f} {allclose_str:>9s}  {status}"
+            )
+    else:
+        print(f"{'scenario':30s} {'ops':>4s} {'kerns':>5s}  strategies / error")
+        for s in summaries:
+            tail = s.get("error", ", ".join(s["strategies"]))
+            print(f"{s['name']:30s} {s['n_ops']:>4d} {s['n_kernels']:>5d}  {tail}")
+    n_failed = sum(
+        1 for s in summaries if "error" in s or s.get("allclose_ok") is False
+    )
+    return 0 if n_failed == 0 else 1
 
 
 if __name__ == "__main__":

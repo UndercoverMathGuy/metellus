@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from compute.fragments import CodegenContext
+from compute.fragments import CodegenContext, TgmemAccess
 
 
 def _msl_float(value: float) -> str:
@@ -27,6 +27,10 @@ if ({gid} < {self.count_dim}) {{
     {self.out_name}[{gid}] = {_msl_float(self.value)};
 }}"""
 
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        return ()
+
 
 @dataclass(frozen=True)
 class ArangeFragment:
@@ -44,6 +48,10 @@ if ({gid} < {self.count_dim}) {{
     {self.out_name}[{gid}] = {_msl_float(self.start)} + {_msl_float(self.step)} * float({gid});
 }}"""
 
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        return ()
+
 
 @dataclass(frozen=True)
 class CopyFragment:
@@ -59,3 +67,7 @@ class CopyFragment:
 if ({gid} < {self.count_dim}) {{
     {self.out_name}[{gid}] = {self.in_name}[{gid}];
 }}"""
+
+    @property
+    def tgmem_accesses(self) -> tuple[TgmemAccess, ...]:
+        return ()

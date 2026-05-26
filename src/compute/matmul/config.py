@@ -19,13 +19,6 @@ class TileConfig:
         return self.tg_x * self.tg_y
 
 
-@dataclass(frozen=True)
-class SplitKConfig:
-    block_M: int = 16
-    block_N: int = 16
-    part_K: int = 512
-
-
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
@@ -44,11 +37,9 @@ def grid_for(M: int, N: int, config: TileConfig) -> tuple[int, int, int]:
     return (ceil_div(N, config.tile_N), ceil_div(M, config.tile_M), 1)
 
 
-def should_use_splitk(M: int, K: int, N: int) -> bool:
-    return M * N <= 4096 and K >= max(M, N, 1024)
-
-
-def select_tile_config(M: int, K: int, N: int) -> TileConfig:
+def select_tile_config(
+    M: int, K: int, N: int
+) -> TileConfig:  # very basic autotuner - will update with better
     if M % 64 != 0 or N % 64 != 0 or K % 32 != 0:
         return TileConfig(32, 32, 16, 2, 2, b_pad=1, c_pad=1)
     if M >= N * 2:

@@ -45,6 +45,15 @@ class FusionStrategy(StrEnum):
     ELEMENTWISE_CHAIN = "elementwise_chain"
     # Pure data rearrangement (ShapeOp). One kernel per op; no fusion in v0.
     STANDALONE_SHAPE = "standalone_shape"
+    # Two matmul anchors feeding one convergent elem ('z = c1 + c2').
+    # Sequential mainloops, both accumulators staged into per-anchor C
+    # tiles, merged via the tg-tile path, stored to device.
+    MULTI_PRODUCER_CONVERGENT = "multi_producer_convergent"
+    # Same shape as above, but the two anchors share an input tensor
+    # with matching K — one outer mainloop emits a single shared A-load
+    # plus two B-loads + two computes per k-chunk, amortising the
+    # shared load across both matmuls.
+    DIAMOND_SHARED = "diamond_shared"
 
 
 @dataclass(frozen=True)
