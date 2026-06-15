@@ -25,7 +25,7 @@ def _validate_threads(num_threads: int) -> None:
             f"num_threads must be a multiple of 32 (Apple SIMD width); got {num_threads}"
         )
 
-
+# ! WHY THIS RESTRICTION?? 
 def _validate_vector_width(cols: int, vector_width: int) -> None:
     if vector_width not in (1, 4):
         raise ValueError(f"vector_width must be 1 or 4; got {vector_width}")

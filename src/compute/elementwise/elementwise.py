@@ -7,9 +7,7 @@ from compute.fragments import CodegenContext, TgmemAccess
 
 class BroadcastSpec(StrEnum):
     """How an elementwise op's secondary operand maps onto the (M, N) output
-    tile. StrEnum so values compare equal to their string form — existing
-    codegen that branches on `mode == "row"` keeps working, but `BroadcastSpec("rrow")`
-    now raises at construction time."""
+    tile. """
 
     NONE = "none"
     SCALAR = "scalar"
@@ -99,6 +97,7 @@ def _rewrite_expression(
     expression: str, x_name: str, y_name: str, cond_name: str
 ) -> str:
     replacements = {"cond": cond_name, "x": x_name, "y": y_name}
+    # ! FIX REGEX TO BE PER TYPE - NO GENERAL - INCOMPREHENSIBLE
     return re.sub(
         r"\b(cond|x|y)\b", lambda match: replacements[match.group(0)], expression
     )

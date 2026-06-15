@@ -1,14 +1,5 @@
 """End-to-end compile + run for an `Operations` graph.
 
-Pipeline:
-
-    ops.build()                  # IR Program
-      → fuse(program)            # tuple[Vertex, ...]
-      → assemble(v)              # tuple[KernelGroup, ...]
-      → alias_group(g)           # tgmem aliasing rewrite
-      → schedule(ops, groups)    # Runtime
-      → runtime.run()            # env dict
-
 Returns a `RunResult(env, groups)`:
 
   - `env` — the executed env dict; callers pull tensors out by their
@@ -43,8 +34,8 @@ def run(ops: Operations, *, profile: bool = False) -> RunResult:
 
     Set `profile=True` to record per-kernel GPU time_ms into the env
     under `t_0`, `t_1`, ..."""
-    program = ops.build()
-    vertices = fuse(program)
-    groups = tuple(alias_group(assemble(v)) for v in vertices)
-    runtime = schedule(ops, groups, profile=profile)
-    return RunResult(env=runtime.run(), groups=groups)
+    program = ops.build() # builder.py (converts to nodes)
+    vertices = fuse(program) # fusion.py (fuses nodes)
+    groups = tuple(alias_group(assemble(v)) for v in vertices) # assembly + aliasing.py (assembles fragments with fusion + aliases buffers)
+    runtime = schedule(ops, groups, profile=profile) # scheduler.py (manages buffer allocation and lifetimes)
+    return RunResult(env=runtime.run(), groups=groups) 

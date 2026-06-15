@@ -1,6 +1,6 @@
 [project]
 name = "triton"
-version = "0.1.0"
+version = "0.42"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,7 +15,7 @@ requires = ["scikit-build-core>=0.10", "nanobind>=2.9.2"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
-wheel.packages = ["src/compute", "src/memory", "src/runtime"]
+wheel.packages = ["src/compute", "src/memory", "src/runtime", "src/orchestrator", "src/api", "src/shape"]
 
 [tool.ruff]
 extend-exclude = ["build", "*.egg-info"]

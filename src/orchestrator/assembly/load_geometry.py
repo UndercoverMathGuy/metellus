@@ -45,4 +45,3 @@ def broadcast_load_geometry(
         return (f"tg.y * {tile_M}", "0", (tile_M, 1), "M", "1", rs, cs)
     if bc is BroadcastSpec.SCALAR:
         return ("0", "0", (1, 1), "1", "1", rs, cs)
-    raise ValueError(f"unsupported broadcast {bc!r}")

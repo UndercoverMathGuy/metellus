@@ -11,6 +11,8 @@ Probe authoring rule: every probe MUST return (ops, mlx_outputs_dict).
 The harness handles execution + comparison.
 """
 
+## !! NOTE: THIS FILE IS FOR AI TESTING OF EDGE CASES - NOT REAL TESTS
+
 from __future__ import annotations
 
 import os
@@ -44,7 +46,7 @@ def _allclose(
     denom = np.maximum(np.abs(b32), 1e-12)
     max_abs = float(diff.max()) if diff.size else 0.0
     max_rel = float((diff / denom).max()) if diff.size else 0.0
-    ok = np.allclose(a32, b32, rtol=rtol, atol=atol, equal_nan=False)
+    ok = np.allclose(a32, b32, rtol=rtol, atol=atol, equal_nan=True)
     return ok, max_abs, max_rel
 
 
@@ -2285,6 +2287,915 @@ def p35_div_by_tensor():
 
 
 # ---------------------------------------------------------------------------
+# NEW PROBES — targeting untested ops and edge cases
+# ---------------------------------------------------------------------------
+
+
+def p200_absolute_op():
+    """Test the `absolute` unary op (fabs). Never tested in any existing probe.
+    Checks positive, negative, zero, and large-magnitude inputs."""
+    rng = np.random.default_rng(42)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    X[0, 0] = 0.0
+    X[0, 1] = -0.0
+    X[0, 2] = -1e20
+    X[0, 3] = 1e20
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("absolute", out="y", operands=("X",))
+    return ops, {"y": np.abs(X).astype(np.float32)}
+
+
+def p201_floor_op():
+    """Test the `floor` unary op. Never tested. Exercises positive fractional,
+    negative fractional, exact integers, and large values."""
+    M, N = 4, 8
+    X = np.array(
+        [
+            [0.0, 0.5, 0.9, 1.0, 1.1, -0.1, -0.5, -0.9],
+            [-1.0, -1.1, 2.7, -2.7, 100.3, -100.3, 1e6, -1e6],
+            [0.001, -0.001, 0.999, -0.999, 3.5, -3.5, 7.0, -7.0],
+            [0.0, -0.0, 1.5, -1.5, 2.0, -2.0, 0.4, -0.4],
+        ],
+        dtype=np.float32,
+    )
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("floor", out="y", operands=("X",))
+    return ops, {"y": np.floor(X).astype(np.float32)}
+
+
+def p202_ceil_op():
+    """Test the `ceil` unary op. Never tested. Exercises positive fractional,
+    negative fractional, exact integers."""
+    M, N = 4, 8
+    X = np.array(
+        [
+            [0.0, 0.5, 0.9, 1.0, 1.1, -0.1, -0.5, -0.9],
+            [-1.0, -1.1, 2.7, -2.7, 100.3, -100.3, 1e6, -1e6],
+            [0.001, -0.001, 0.999, -0.999, 3.5, -3.5, 7.0, -7.0],
+            [0.0, -0.0, 1.5, -1.5, 2.0, -2.0, 0.4, -0.4],
+        ],
+        dtype=np.float32,
+    )
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ceil", out="y", operands=("X",))
+    return ops, {"y": np.ceil(X).astype(np.float32)}
+
+
+def p203_sin_op():
+    """Test the `sin` unary op. Never tested. Uses modest inputs to keep
+    precision within fp32 tolerances."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.uniform(-np.pi, np.pi, (M, N)).astype(np.float32)
+    X[0, 0] = 0.0
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("sin", out="y", operands=("X",))
+    return ops, {"y": np.sin(X).astype(np.float32)}
+
+
+def p204_cos_op():
+    """Test the `cos` unary op. Never tested. Uses modest inputs."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.uniform(-np.pi, np.pi, (M, N)).astype(np.float32)
+    X[0, 0] = 0.0
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("cos", out="y", operands=("X",))
+    return ops, {"y": np.cos(X).astype(np.float32)}
+
+
+def p205_ge_comparison():
+    """Test the `ge` (>=) binary comparison. Never tested. Verifies both
+    strict greater-than values and EQUAL values (boundary at threshold=0)."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    # Force some elements to be exactly 0.0 to test boundary
+    X[0, 0] = 0.0
+    X[0, 1] = 0.0
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ge", out="mask", operands=("X", 0.0))
+    expected = (X >= 0.0).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p206_le_comparison():
+    """Test the `le` (<=) binary comparison. Never tested. Tests direction:
+    le(X, 5.0) = X <= 5.0. Also checks exact equality at threshold."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    # Force exact threshold values
+    X[0, 0] = 0.0
+    X[0, 1] = 1.0
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("le", out="mask", operands=("X", 0.0))
+    expected = (X <= 0.0).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p207_binary_min_op():
+    """Test the binary `min` (fmin) elementwise op. Only reduction-min
+    has been tested; binary min is untested."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    Y = rng.standard_normal((M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(Y, "Y")
+    ops.elementwise("min", out="z", operands=("X", "Y"))
+    return ops, {"z": np.minimum(X, Y).astype(np.float32)}
+
+
+def p208_matmul_k1():
+    """Matmul with K=1: (M, 1) @ (1, N). The matmul tile_K=16, so K=1
+    is well below tile_K. Tests the unaligned path with a single K slice."""
+    rng = np.random.default_rng(0)
+    M, K, N = 64, 1, 64
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    mlx_out = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": mlx_out.astype(np.float32)}
+
+
+def p209_matmul_k2():
+    """Matmul with K=2: (M, 2) @ (2, N). K=2 < tile_K=16 but K=2 means
+    only two K-iterations in the inner loop."""
+    rng = np.random.default_rng(0)
+    M, K, N = 64, 2, 64
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    mlx_out = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": mlx_out.astype(np.float32)}
+
+
+def p210_floor_then_chain():
+    """floor → mul → add chain. Tests floor in the middle of a fused chain."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.uniform(-5.0, 5.0, (M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("floor", out="f", operands=("X",))
+    ops.elementwise("mul", out="f2", operands=("f", 2.0))
+    ops.elementwise("add", out="y", operands=("f2", 1.0))
+    expected = (np.floor(X) * 2.0 + 1.0).astype(np.float32)
+    return ops, {"y": expected}
+
+
+def p211_product_reduction_with_single_zero():
+    """Product reduction where one element per row is exactly 0.
+    Result should be 0 for those rows."""
+    rng = np.random.default_rng(0)
+    M, K = 16, 32
+    X = rng.uniform(0.5, 2.0, (M, K)).astype(np.float32)
+    # Set element [i, 0] = 0.0 for even rows, so product must be 0.
+    X[0::2, 0] = 0.0
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("product", out="p", x="X", axis=-1)
+    expected = np.prod(X, axis=-1).astype(np.float32)
+    return ops, {"p": expected}
+
+
+def p212_ge_le_boundary_exact_equal():
+    """ge and le when x == y exactly. ge(X, X) and le(X, X) should both
+    be all 1s. Tests that boundary values (x == threshold) are included."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    Y = X.copy()  # same values
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(Y, "Y")
+    ops.elementwise("ge", out="ge_mask", operands=("X", "Y"))
+    ops.elementwise("le", out="le_mask", operands=("X", "Y"))
+    return ops, {
+        "ge_mask": np.ones((M, N), dtype=np.float32),
+        "le_mask": np.ones((M, N), dtype=np.float32),
+    }
+
+
+def p213_absolute_in_matmul_epilogue():
+    """absolute (fabs) in a matmul epilogue (lane-agnostic unary → register
+    epilogue). Not tested in any existing probe."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 32, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    ops.elementwise("absolute", out="y", operands=("C",))
+    expected = np.abs(np.array(_mx(A) @ _mx(B))).astype(np.float32)
+    return ops, {"y": expected}
+
+
+def p214_floor_as_matmul_prologue():
+    """floor on A-side as a matmul prologue. floor is a unary op so
+    _prologue_eligible=True and it should be absorbed."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 32, 32
+    # Use values where floor makes meaningful changes
+    X = rng.uniform(-3.0, 3.0, (M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(B, "B")
+    ops.elementwise("floor", out="Xf", operands=("X",))
+    ops.matmul(a="Xf", b="B", out="C")
+    expected = np.array(_mx(np.floor(X).astype(np.float32)) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p215_ge_then_sum_count_positive():
+    """ge(X, 0) produces 0/1 float mask; reduce_sum gives count of
+    positive-or-zero elements. Tests ge → reduction pipeline."""
+    rng = np.random.default_rng(0)
+    M, K = 32, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ge", out="mask", operands=("X", 0.0))
+    ops.reduction("sum", out="count", x="mask", axis=-1)
+    expected = np.sum(X >= 0.0, axis=-1).astype(np.float32)
+    return ops, {"count": expected}
+
+
+def p216_le_broadcast_row():
+    """le with row-broadcast: X <= row_thresh(1, N). Tests le with
+    y_broadcast='row'."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    thresh = rng.standard_normal((1, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(thresh, "thresh")
+    ops.elementwise("le", out="mask", operands=("X", "thresh"), y_broadcast="row")
+    expected = (X <= thresh).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p217_matmul_k3():
+    """Matmul with K=3 (prime, below tile_K=16). Tests the unaligned path
+    for an unusual K value."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 3, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    mlx_out = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": mlx_out.astype(np.float32)}
+
+
+def p218_sin_cos_identity():
+    """sin²(x) + cos²(x) = 1 for all x. Verifies both sin and cos
+    agree numerically via the Pythagorean identity."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.uniform(-np.pi, np.pi, (M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("sin", out="s", operands=("X",))
+    ops.elementwise("cos", out="c", operands=("X",))
+    ops.elementwise("mul", out="s2", operands=("s", "s"))
+    ops.elementwise("mul", out="c2", operands=("c", "c"))
+    ops.elementwise("add", out="one", operands=("s2", "c2"))
+    expected = np.ones((M, N), dtype=np.float32)
+    return ops, {"one": expected}
+
+
+def p219_ceil_then_reduce():
+    """ceil → reduce_max. ceil of negative fractions then max-reduce.
+    Tests ceil in a reduction prologue."""
+    rng = np.random.default_rng(0)
+    M, K = 16, 48
+    X = rng.uniform(-3.0, 3.0, (M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ceil", out="cx", operands=("X",))
+    ops.reduction("max", out="row_max", x="cx", axis=-1)
+    expected = np.max(np.ceil(X), axis=-1).astype(np.float32)
+    return ops, {"row_max": expected}
+
+
+def p220_ge_not_le_direction():
+    """Verify ge(X, 5.0) != le(X, 5.0) for a tensor with mixed values.
+    If ge and le are swapped in codegen, this would produce wrong results."""
+    M, N = 4, 8
+    X = np.array(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            [-1.0, -2.0, 0.0, 5.0, 5.0, 4.9, 5.1, 10.0],
+            [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+            [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ge", out="ge_mask", operands=("X", 5.0))
+    ops.elementwise("le", out="le_mask", operands=("X", 5.0))
+    return ops, {
+        "ge_mask": (X >= 5.0).astype(np.float32),
+        "le_mask": (X <= 5.0).astype(np.float32),
+    }
+
+
+def p221_ge_single_consumer_matmul_prologue():
+    """ge(X, 0) → matmul: comparison op absorbed as single-consumer
+    matmul prologue. Tests bool-wrapping in the float4 A-load value transform."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 32, 32
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(B, "B")
+    ops.elementwise("ge", out="mask", operands=("X", 0.0))  # 0/1 float
+    ops.matmul(a="mask", b="B", out="C")
+    mlx_mask = (X >= 0.0).astype(np.float32)
+    expected = np.array(_mx(mlx_mask) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p222_le_in_matmul_register_epilogue():
+    """le(C, 0) as matmul register epilogue. le is binary with Scalar y →
+    lane-agnostic → register epilogue. Tests bool-wrapping in register epilogue."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 32, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    ops.elementwise("le", out="mask", operands=("C", 0.0))
+    mlx_C = np.array(_mx(A) @ _mx(B))
+    expected = (mlx_C <= 0.0).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p223_floor_in_reduction_epilogue():
+    """floor after reduce: tests reduction epilogue with a unary floor op.
+    build_reduction_epilogue_transform handles unary ops via make_unary builder."""
+    rng = np.random.default_rng(0)
+    M, K = 16, 32
+    X = rng.uniform(-5.0, 5.0, (M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("sum", out="s", x="X", axis=-1)
+    ops.elementwise("floor", out="y", operands=("s",))
+    expected = np.floor(np.array(mx.sum(_mx(X), axis=-1))).astype(np.float32)
+    return ops, {"y": expected}
+
+
+def p224_abs_in_reduction_prologue():
+    """reduce_sum(abs(X)) — absolute value as reduction prologue.
+    Tests unary prologue with fabs in the reduction loop body."""
+    rng = np.random.default_rng(0)
+    M, K = 32, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("absolute", out="aX", operands=("X",))
+    ops.reduction("sum", out="s", x="aX", axis=-1)
+    expected = np.array(mx.sum(mx.abs(_mx(X)), axis=-1)).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p225_matmul_k4():
+    """Matmul K=4: exactly one float4 per row. K=4 < tile_K=16; unaligned
+    path. The float4 A-load at col_limit=4 should load exactly the right values."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 4, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p226_matmul_k8():
+    """Matmul K=8: the inner k-step in MatmulComputeFragment is 8. K=8 means
+    exactly one inner iteration. Tests aligned inner loop with K=tile_K/2."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 8, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p227_product_reduction_large_k():
+    """Product reduction with K=256 where values are near 1.0 to avoid overflow.
+    Tests that the multi-SIMD-group accumulation path works for large K."""
+    rng = np.random.default_rng(0)
+    M, K = 8, 256
+    # Values near 1 so product stays in fp32 range
+    X = rng.uniform(0.98, 1.02, (M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("product", out="p", x="X", axis=-1)
+    expected = np.prod(X, axis=-1).astype(np.float32)
+    return ops, {"p": expected}
+
+
+def p228_ge_chain_into_reduce():
+    """Chain: ge(X, 0) → mul(mask, X) → reduce_sum. Tests comparison op
+    in an elementwise chain that then feeds a reduction prologue."""
+    rng = np.random.default_rng(0)
+    M, K = 32, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ge", out="mask", operands=("X", 0.0))
+    ops.elementwise("mul", out="xpos", operands=("mask", "X"))  # X where X>=0, else 0
+    ops.reduction("sum", out="s", x="xpos", axis=-1)
+    mlx_mask = (X >= 0.0).astype(np.float32)
+    expected = np.array(mx.sum(_mx(mlx_mask * X), axis=-1)).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p229_reduction_k4():
+    """Reduction with K=4 (very small). Tests the edge case where K is exactly
+    4 and multiple SIMD lanes are idle during the reduction."""
+    rng = np.random.default_rng(0)
+    M, K = 16, 4
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("sum", out="s", x="X", axis=-1)
+    expected = np.array(mx.sum(_mx(X), axis=-1)).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p230_floor_of_negative_integers():
+    """floor of exact negative integers should be the integers themselves.
+    floor(-3.0) = -3.0, not -4.0. Edge case for floor on integer-valued floats."""
+    M, N = 4, 8
+    X = np.array(
+        [
+            [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0],
+            [-10.0, -5.0, -4.0, -3.5, 3.5, 4.0, 5.0, 10.0],
+            [-0.0, 0.0, -1.5, 1.5, -2.5, 2.5, -7.0, 7.0],
+            [-100.0, 100.0, -0.001, 0.001, -99.9, 99.9, -50.5, 50.5],
+        ],
+        dtype=np.float32,
+    )
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("floor", out="y", operands=("X",))
+    return ops, {"y": np.floor(X).astype(np.float32)}
+
+
+def p231_ge_two_tensors_no_broadcast():
+    """ge(X, Y) with both operands as full tensors (no broadcast). Tests
+    the non-scalar secondary path for comparison ops."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    Y = rng.standard_normal((M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(Y, "Y")
+    ops.elementwise("ge", out="mask", operands=("X", "Y"))
+    expected = (X >= Y).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p232_abs_then_ge_then_sum():
+    """abs(X) → ge(abs, 1.0) → sum. Tests abs in a chain that includes
+    a comparison, feeding into a reduction."""
+    rng = np.random.default_rng(0)
+    M, K = 32, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("absolute", out="aX", operands=("X",))
+    ops.elementwise("ge", out="mask", operands=("aX", 1.0))
+    ops.reduction("sum", out="count", x="mask", axis=-1)
+    expected = np.sum(np.abs(X) >= 1.0, axis=-1).astype(np.float32)
+    return ops, {"count": expected}
+
+
+def p233_ceil_in_register_epilogue():
+    """ceil as matmul register epilogue — ceil is unary → lane-agnostic →
+    register epilogue. Tests ceil inside the simd thread_elements path."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 32, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    ops.elementwise("ceil", out="y", operands=("C",))
+    expected = np.ceil(np.array(_mx(A) @ _mx(B))).astype(np.float32)
+    return ops, {"y": expected}
+
+
+def p234_matmul_k5_prime():
+    """Matmul K=5 (prime, not divisible by 4 or 8). Tests the scalar
+    per-lane fallback in the unaligned A-tile load."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 5, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p235_le_col_broadcast():
+    """le with COL-broadcast: col_bias (M, 1). le(X, col_bias) where col_bias
+    is a per-row threshold. Tests le with col-broadcast secondary."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    thresh = rng.standard_normal((M, 1)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(thresh, "thresh")
+    ops.elementwise("le", out="mask", operands=("X", "thresh"), y_broadcast="col")
+    expected = (X <= thresh).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p236_scalar_literal_tiny_positive():
+    """Test scalar_literal for a very small positive value (1e-40 — below
+    fp32 normal range, tests scalar emission for denormalized literals)."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    # 1e-40 forces repr "1e-40" (has 'e') → scalar_literal uses f"{v!r}f" path
+    ops.elementwise("add", out="y", operands=("X", 1e-40))
+    expected = (X + np.float32(1e-40)).astype(np.float32)
+    return ops, {"y": expected}
+
+
+def p237_where_then_reduce():
+    """where(X, Y, Cond) → reduce_sum. The where op is standalone (not
+    prologue-eligible), so it materializes first, then the reduction
+    absorbs a potential prologue chain."""
+    rng = np.random.default_rng(0)
+    M, K = 32, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    Y = rng.standard_normal((M, K)).astype(np.float32)
+    Cond = (rng.standard_normal((M, K)) > 0).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(Y, "Y")
+    ops.from_numpy(Cond, "Cond")
+    ops.elementwise("where", out="W", operands=("X", "Y", "Cond"))
+    ops.reduction("sum", out="s", x="W", axis=-1)
+    mlx_W = np.where(Cond != 0.0, X, Y).astype(np.float32)
+    expected = np.array(mx.sum(_mx(mlx_W), axis=-1)).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p238_multiple_reductions_same_input():
+    """s1 = sum(X); s2 = max(X); s3 = min(X). Three reductions of the same
+    input. Tests that X stays alive through all three dispatches."""
+    rng = np.random.default_rng(0)
+    M, K = 16, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("sum", out="s1", x="X", axis=-1)
+    ops.reduction("max", out="s2", x="X", axis=-1)
+    ops.reduction("min", out="s3", x="X", axis=-1)
+    mlx_X = _mx(X)
+    return ops, {
+        "s1": np.array(mx.sum(mlx_X, axis=-1)).astype(np.float32),
+        "s2": np.array(mx.max(mlx_X, axis=-1)).astype(np.float32),
+        "s3": np.array(mx.min(mlx_X, axis=-1)).astype(np.float32),
+    }
+
+
+def p239_matmul_k16():
+    """Matmul K=16 (exactly tile_K): one K-chunk in the outer loop.
+    The inner loop runs once loading exactly 16 elements per row."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 16, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p240_matmul_k17():
+    """Matmul K=17 (one full tile_K=16 chunk + 1 partial). Tests the outer
+    loop with exactly 2 iterations where the second is partially masked."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 17, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p241_negate_ge_negate_chain():
+    """Chain: negate(X) → ge(neg_X, 0.0) → negate(mask). Tests a comparison
+    op in the MIDDLE of a chain (not at head or tail)."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.standard_normal((M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("negate", out="nx", operands=("X",))
+    ops.elementwise("ge", out="mask", operands=("nx", 0.0))
+    ops.elementwise("negate", out="nmask", operands=("mask",))
+    # -X >= 0 means X <= 0. mask = 1 where X <= 0. -mask = -1 or 0.
+    expected = -((-X >= 0.0).astype(np.float32))
+    return ops, {"nmask": expected.astype(np.float32)}
+
+
+def p242_ge_as_prologue_into_reduction():
+    """ge(X, 0) → reduce_sum: comparison absorbed as reduction prologue.
+    Tests wrap_bool in the per-element prologue path of the reduction."""
+    rng = np.random.default_rng(0)
+    M, K = 32, 64
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("ge", out="mask", operands=("X", 0.0))
+    ops.reduction("sum", out="s", x="mask", axis=-1)
+    expected = np.sum(X >= 0.0, axis=-1).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p243_matmul_K256():
+    """Matmul K=256 — tests multiple full tile_K=32 chunks in the outer loop."""
+    rng = np.random.default_rng(0)
+    M, K, N = 64, 256, 64
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p244_reduction_K256():
+    """Reduction sum with K=256 — tests 2 full stride passes per row (each
+    thread processes 2 elements when K=256 > tg_x=128)."""
+    rng = np.random.default_rng(0)
+    M, K = 16, 256
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("sum", out="s", x="X", axis=-1)
+    expected = np.array(mx.sum(_mx(X), axis=-1)).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p245_reduction_K512():
+    """Reduction with K=512 — each thread processes 4 elements. Tests the
+    per-lane accumulation with more than one iteration per SIMD group pass."""
+    rng = np.random.default_rng(0)
+    M, K = 8, 512
+    X = rng.standard_normal((M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("sum", out="s", x="X", axis=-1)
+    expected = np.array(mx.sum(_mx(X), axis=-1)).astype(np.float32)
+    return ops, {"s": expected}
+
+
+def p246_ge_in_tg_tile_matmul_epilogue():
+    """ge as matmul tg-tile epilogue: C = A@B + bias; then (C+bias) >= 0.
+    The add(bias) is not lane-agnostic (tensor y), so it forces tg-tile path.
+    Then ge is another epilogue op on top. Tests bool-wrapping in tg-tile chain."""
+    rng = np.random.default_rng(0)
+    M, K, N = 32, 32, 32
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    bias = rng.standard_normal((1, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.from_numpy(bias, "bias")
+    ops.matmul(a="A", b="B", out="C")
+    ops.elementwise("add", out="Cb", operands=("C", "bias"), y_broadcast="row")
+    ops.elementwise("ge", out="mask", operands=("Cb", 0.0))
+    mlx_C = np.array(_mx(A) @ _mx(B)) + bias
+    expected = (mlx_C >= 0.0).astype(np.float32)
+    return ops, {"mask": expected}
+
+
+def p247_large_matmul_256x256():
+    """Matmul M=N=256, K=64. Tests larger shapes that use the optimal tile
+    config (64×64×32 for 256×64×256)."""
+    rng = np.random.default_rng(0)
+    M, K, N = 256, 64, 256
+    A = rng.standard_normal((M, K)).astype(np.float32)
+    B = rng.standard_normal((K, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(A, "A")
+    ops.from_numpy(B, "B")
+    ops.matmul(a="A", b="B", out="C")
+    expected = np.array(_mx(A) @ _mx(B))
+    return ops, {"C": expected.astype(np.float32)}
+
+
+def p248_floor_then_absolute():
+    """floor → absolute. Tests that absolute correctly handles negative
+    floor values. floor(-0.5) = -1.0, abs(-1.0) = 1.0."""
+    rng = np.random.default_rng(0)
+    M, N = 16, 32
+    X = rng.uniform(-3.0, 3.0, (M, N)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("floor", out="f", operands=("X",))
+    ops.elementwise("absolute", out="y", operands=("f",))
+    expected = np.abs(np.floor(X)).astype(np.float32)
+    return ops, {"y": expected}
+
+
+def p249_reduce_product_K128():
+    """Product reduction with K=128 — one full tg_x=128 worth of elements.
+    Tests the exact SIMD boundary where each thread handles exactly 1 element."""
+    rng = np.random.default_rng(0)
+    M, K = 8, 128
+    # Values near 1 to keep product in fp32 range
+    X = rng.uniform(0.99, 1.01, (M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("product", out="p", x="X", axis=-1)
+    expected = np.prod(X, axis=-1).astype(np.float32)
+    return ops, {"p": expected}
+
+
+def p250_reduce_product_K129():
+    """Product reduction with K=129 — just above tg_x=128. Lane 0 must process
+    elements 0 AND 128 (two iterations). Tests the carry-over into 2nd pass."""
+    rng = np.random.default_rng(0)
+    M, K = 8, 129
+    X = rng.uniform(0.99, 1.01, (M, K)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("product", out="p", x="X", axis=-1)
+    expected = np.prod(X, axis=-1).astype(np.float32)
+    return ops, {"p": expected}
+
+def p251_scalar_inf_as_min_clamp():
+    """min(X, +inf) should pass X through unchanged.
+    BUG CANDIDATE: scalar_literal(float('inf')) generates 'inff' which is
+    invalid MSL — Metal compiler should reject it."""
+    rng = np.random.default_rng(42)
+    X = rng.standard_normal((16, 16)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("min", out="y", operands=("X", float("inf")))
+    expected = np.minimum(X, float("inf"))  # = X
+    return ops, {"y": expected}
+
+
+def p252_scalar_neg_inf_as_max_clamp():
+    """max(X, -inf) should pass X through unchanged.
+    BUG CANDIDATE: scalar_literal(float('-inf')) generates '-inff' — invalid MSL."""
+    rng = np.random.default_rng(42)
+    X = rng.standard_normal((16, 16)).astype(np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("max", out="y", operands=("X", float("-inf")))
+    expected = np.maximum(X, float("-inf"))  # = X
+    return ops, {"y": expected}
+
+
+def p255_equal_nan_self():
+    """equal(NaN, NaN) — IEEE says NaN != NaN, so result must be 0.0.
+    Tests that MSL '==' on nan gives false → wrap_bool → 0.0, matching NumPy."""
+    X = np.full((8, 8), float("nan"), dtype=np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("equal", out="mask", operands=("X", float("nan")))
+    expected = (X == np.float32("nan")).astype(np.float32)  # all 0.0
+    return ops, {"mask": expected}
+
+
+def p256_not_equal_nan_self():
+    """not_equal(NaN, NaN) — IEEE: NaN != NaN is TRUE → result 1.0.
+    Tests scalar literal nan: 'nanf' is invalid MSL → BUG CANDIDATE."""
+    X = np.full((8, 8), float("nan"), dtype=np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("not_equal", out="mask", operands=("X", float("nan")))
+    expected = (X != np.float32("nan")).astype(np.float32)  # all 1.0
+    return ops, {"mask": expected}
+
+
+def p257_mul_zero_by_inf():
+    """0 * inf = nan in IEEE float — tests that the MSL kernel and NumPy agree
+    on NaN propagation. Builds inf from device data (no scalar literal)."""
+    X = np.zeros((8, 8), dtype=np.float32)
+    INF = np.full((8, 8), float("inf"), dtype=np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.from_numpy(INF, "INF")
+    ops.elementwise("mul", out="y", operands=("X", "INF"))
+    expected = X * INF  # 0 * inf = nan
+    return ops, {"y": expected}
+
+
+def p259_recip_of_inf():
+    """recip(+inf) should be 0.0 — tests that 1/inf = 0 in both MSL and NumPy."""
+    X = np.full((8, 8), float("inf"), dtype=np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("recip", out="y", operands=("X",))
+    expected = np.float32(1.0) / X  # 1/inf = 0
+    return ops, {"y": expected}
+
+
+def p260_log_of_zero():
+    """log(0) should be -inf — tests boundary of log at zero."""
+    X = np.zeros((8, 8), dtype=np.float32)
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.elementwise("log", out="y", operands=("X",))
+    expected = np.log(X).astype(np.float32)  # all -inf
+    return ops, {"y": expected}
+
+
+def p265_reduce_sum_with_nan_input():
+    """sum-reduction of a row containing NaN — both MSL simd_sum and NumPy
+    should propagate nan, but _allclose(nan, nan, equal_nan=False) will
+    still report DIFF, revealing the harness limitation for nan outputs."""
+    X = np.array(
+        [[float("nan"), 1.0, 2.0, 3.0],
+         [4.0, 5.0, 6.0, 7.0]],
+        dtype=np.float32
+    )
+    ops = Operations()
+    ops.from_numpy(X, "X")
+    ops.reduction("sum", out="r", x="X", axis=-1)
+    expected = np.sum(X, axis=-1).astype(np.float32)  # [nan, 22.0]
+    return ops, {"r": expected}
+
+
+def p266_where_operand_is_nan_tensor():
+    """where(cond, x, y) with x containing NaN values. The NaN should
+    be selected when cond is True. Tests that NaN passes through where."""
+    cond = np.array([[1.0, 0.0, 1.0, 0.0]] * 4, dtype=np.float32)
+    x = np.array([[float("nan"), float("nan"), float("nan"), float("nan")]] * 4,
+                 dtype=np.float32)
+    y = np.ones((4, 4), dtype=np.float32)
+    ops = Operations()
+    ops.from_numpy(x, "x")
+    ops.from_numpy(y, "y")
+    ops.from_numpy(cond, "cond")
+    ops.elementwise("where", out="out", operands=("x", "y", "cond"))
+    expected = np.where(cond.astype(bool), x, y)  # [[nan, 1, nan, 1], ...]
+    return ops, {"out": expected.astype(np.float32)}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2550,6 +3461,67 @@ PROBES = [
         "p129_multi_anchor_with_prologue_into_either_anchor",
         p129_multi_anchor_with_prologue_into_either_anchor,
     ),
+    # New probes for untested ops and edge cases
+    ("p200_absolute_op", p200_absolute_op),
+    ("p201_floor_op", p201_floor_op),
+    ("p202_ceil_op", p202_ceil_op),
+    ("p203_sin_op", p203_sin_op),
+    ("p204_cos_op", p204_cos_op),
+    ("p205_ge_comparison", p205_ge_comparison),
+    ("p206_le_comparison", p206_le_comparison),
+    ("p207_binary_min_op", p207_binary_min_op),
+    ("p208_matmul_k1", p208_matmul_k1),
+    ("p209_matmul_k2", p209_matmul_k2),
+    ("p210_floor_then_chain", p210_floor_then_chain),
+    ("p211_product_reduction_with_single_zero", p211_product_reduction_with_single_zero),
+    ("p212_ge_le_boundary_exact_equal", p212_ge_le_boundary_exact_equal),
+    ("p213_absolute_in_matmul_epilogue", p213_absolute_in_matmul_epilogue),
+    ("p214_floor_as_matmul_prologue", p214_floor_as_matmul_prologue),
+    ("p215_ge_then_sum_count_positive", p215_ge_then_sum_count_positive),
+    ("p216_le_broadcast_row", p216_le_broadcast_row),
+    ("p217_matmul_k3", p217_matmul_k3),
+    ("p218_sin_cos_identity", p218_sin_cos_identity),
+    ("p219_ceil_then_reduce", p219_ceil_then_reduce),
+    ("p220_ge_not_le_direction", p220_ge_not_le_direction),
+    ("p221_ge_single_consumer_matmul_prologue", p221_ge_single_consumer_matmul_prologue),
+    ("p222_le_in_matmul_register_epilogue", p222_le_in_matmul_register_epilogue),
+    ("p223_floor_in_reduction_epilogue", p223_floor_in_reduction_epilogue),
+    ("p224_abs_in_reduction_prologue", p224_abs_in_reduction_prologue),
+    ("p225_matmul_k4", p225_matmul_k4),
+    ("p226_matmul_k8", p226_matmul_k8),
+    ("p227_product_reduction_large_k", p227_product_reduction_large_k),
+    ("p228_ge_chain_into_reduce", p228_ge_chain_into_reduce),
+    ("p229_reduction_k4", p229_reduction_k4),
+    ("p230_floor_of_negative_integers", p230_floor_of_negative_integers),
+    ("p231_ge_two_tensors_no_broadcast", p231_ge_two_tensors_no_broadcast),
+    ("p232_abs_then_ge_then_sum", p232_abs_then_ge_then_sum),
+    ("p233_ceil_in_register_epilogue", p233_ceil_in_register_epilogue),
+    ("p234_matmul_k5_prime", p234_matmul_k5_prime),
+    ("p235_le_col_broadcast", p235_le_col_broadcast),
+    ("p236_scalar_literal_tiny_positive", p236_scalar_literal_tiny_positive),
+    ("p237_where_then_reduce", p237_where_then_reduce),
+    ("p238_multiple_reductions_same_input", p238_multiple_reductions_same_input),
+    ("p239_matmul_k16", p239_matmul_k16),
+    ("p240_matmul_k17", p240_matmul_k17),
+    ("p241_negate_ge_negate_chain", p241_negate_ge_negate_chain),
+    ("p242_ge_as_prologue_into_reduction", p242_ge_as_prologue_into_reduction),
+    ("p243_matmul_K256", p243_matmul_K256),
+    ("p244_reduction_K256", p244_reduction_K256),
+    ("p245_reduction_K512", p245_reduction_K512),
+    ("p246_ge_in_tg_tile_matmul_epilogue", p246_ge_in_tg_tile_matmul_epilogue),
+    ("p247_large_matmul_256x256", p247_large_matmul_256x256),
+    ("p248_floor_then_absolute", p248_floor_then_absolute),
+    ("p249_reduce_product_K128", p249_reduce_product_K128),
+    ("p250_reduce_product_K129", p250_reduce_product_K129),
+    ("p251_scalar_inf_as_min_clamp", p251_scalar_inf_as_min_clamp),
+    ("p252_scalar_neg_inf_as_max_clamp", p252_scalar_neg_inf_as_max_clamp),
+    ("p255_equal_nan_self", p255_equal_nan_self),
+    ("p256_not_equal_nan_self", p256_not_equal_nan_self),
+    ("p257_mul_zero_by_inf", p257_mul_zero_by_inf),
+    ("p259_recip_of_inf", p259_recip_of_inf),
+    ("p260_log_of_zero", p260_log_of_zero),
+    ("p265_reduce_sum_with_nan_input", p265_reduce_sum_with_nan_input),
+    ("p266_where_operand_is_nan_tensor", p266_where_operand_is_nan_tensor),
 ]
 
 

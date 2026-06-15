@@ -32,8 +32,7 @@ to download. View tensors (transpose / reshape views) ARE downloaded
 when their backing buffer is materialized — the bytes come from the
 storage owner and are reshaped to the view's logical shape. Note: for
 a transpose / non-contiguous view, this returns the buffer's bytes
-reinterpreted, not a true logical transpose; a stride-aware Download
-path is the planned follow-up.
+reinterpreted, not a true logical transpose
 
 Free is end-of-life per buffer: download (if needed), then free, the
 moment no later group touches the key. Eager — no reuse, no aliasing.

@@ -12,6 +12,7 @@ tiled-chain fragment for emitting the same per-op MSL.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Callable
 
@@ -49,6 +50,10 @@ def wrap_bool(op: str, expr: str) -> str:
 
 def scalar_literal(value: float) -> str:
     """fp32 literal with an 'f' suffix so MSL doesn't widen to double."""
+    if math.isnan(value):
+        return "NAN"
+    if math.isinf(value):
+        return "INFINITY" if value > 0 else "(-INFINITY)"
     return f"{value!r}f" if "e" in repr(value) else f"{value}f"
 
 
